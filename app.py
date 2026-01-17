@@ -7,133 +7,113 @@ import io
 import os
 from streamlit_mic_recorder import mic_recorder
 from pydub import AudioSegment
-from gtts import gTTS # App ki Awaaz
+from gtts import gTTS
+from streamlit_gsheets import GSheetsConnection
 
 st.set_page_config(page_title="Nia Rice Mill AI", page_icon="🌾", layout="wide")
 
-# --- SESSION STATE (App ki Yaadasht) ---
+# --- CONNECT TO GOOGLE SHEET ---
+conn_gsheets = st.connection("gsheets", type=GSheetsConnection)
+
+# --- SESSION STATE ---
 if 'step' not in st.session_state:
-    st.session_state.step = 1  # 1 = Sunna, 2 = Confirm karna
+    st.session_state.step = 1
 if 'pending_weight' not in st.session_state:
     st.session_state.pending_weight = None
 
-# --- DATABASE CONNECTION ---
-def get_connection():
-    return sqlite3.connect('rice_mill.db')
+# --- FUNCTION: SAVE DATA (Local + Google Sheet) ---
+def save_data_everywhere(wazan, price):
+    now = datetime.datetime.now()
+    d_date = now.strftime("%Y-%m-%d")
+    d_time = now.strftime("%H:%M:%S")
 
-def init_db():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS records (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    date TEXT, time TEXT, weight REAL, price REAL)''')
+    # 1. Local Database (App ke liye)
+    conn = sqlite3.connect('rice_mill.db')
+    conn.execute('INSERT INTO records (date, time, weight, price) VALUES (?, ?, ?, ?)', 
+              (d_date, d_time, wazan, price))
     conn.commit()
     conn.close()
 
-init_db()
+    # 2. Google Sheet (Permanent Backup)
+    try:
+        # Naya data create karo
+        new_data = pd.DataFrame(
+            [[d_date, d_time, wazan, price]], 
+            columns=['Date', 'Time', 'Weight', 'Price']
+        )
+        
+        # Purana data padho
+        existing_data = conn_gsheets.read()
+        
+        # Dono ko jodo
+        updated_df = pd.concat([existing_data, new_data], ignore_index=True)
+        
+        # Wapas Sheet par update kar do
+        conn_gsheets.update(data=updated_df)
+        st.toast("✅ Google Sheet Updated!", icon="☁️")
+        
+    except Exception as e:
+        st.error(f"⚠️ Sheet Error: {e}")
 
-# --- HELPER: App Bolegi ---
+# --- HELPER: AI SPEAK ---
 def speak(text):
     try:
         tts = gTTS(text=text, lang='hi')
-        filename = "temp_audio.mp3"
-        tts.save(filename)
-        # Hidden audio player jo khud bajega
-        st.audio(filename, format="audio/mp3", autoplay=True)
+        tts.save("temp.mp3")
+        st.audio("temp.mp3", format="audio/mp3", autoplay=True)
     except:
-        pass # Agar audio fail ho jaye toh error mat dikhao
+        pass
 
-# --- SIDEBAR (Admin) ---
-with st.sidebar:
-    if st.button("🔄 Refresh / Reset App"):
-        st.session_state.step = 1
-        st.session_state.pending_weight = None
-        st.rerun()
-
-# --- MAIN APP ---
+# --- MAIN APP UI ---
 st.title("🌾 Nia Rice Mill AI")
 
-# --- STEP 1: VOICE INPUT (Sunne ka kaam) ---
+# --- STEP 1: SUNO ---
 if st.session_state.step == 1:
-    st.info("🎙️ Niche Mic dabayein aur Wazan bolein...")
-    
-    # Mic Button
-    c1, c2 = st.columns([1, 4])
-    with c1:
-        audio = mic_recorder(start_prompt="🔴 Start", stop_prompt="⏹️ Stop", key='recorder_step1')
+    st.info("🎙️ Mic dabayein aur bolein...")
+    audio = mic_recorder(start_prompt="🔴 Start", stop_prompt="⏹️ Stop", key='rec1')
     
     if audio:
         try:
-            # Convert Audio
-            webm_data = audio['bytes']
-            sound = AudioSegment.from_file(io.BytesIO(webm_data))
-            wav_buffer = io.BytesIO()
-            sound.export(wav_buffer, format="wav")
-            wav_buffer.seek(0)
-
-            # Recognize
+            webm = audio['bytes']
+            sound = AudioSegment.from_file(io.BytesIO(webm))
+            wav = io.BytesIO()
+            sound.export(wav, format="wav")
+            wav.seek(0)
+            
             r = sr.Recognizer()
-            with sr.AudioFile(wav_buffer) as source:
-                audio_file = r.record(source)
-                text = r.recognize_google(audio_file, language="hi-IN")
+            with sr.AudioFile(wav) as source:
+                txt = r.recognize_google(r.record(source), language="hi-IN")
+                nums = [float(s) for s in txt.split() if s.replace('.', '', 1).isdigit()]
                 
-                # Number Logic
-                numbers = [float(s) for s in text.split() if s.replace('.', '', 1).isdigit()]
-                
-                if numbers:
-                    wazan = numbers[0]
-                    # STATE CHANGE: Ab Step 2 par jao
-                    st.session_state.pending_weight = wazan
+                if nums:
+                    st.session_state.pending_weight = nums[0]
                     st.session_state.step = 2
-                    st.rerun() # Page reload karo taaki Step 2 dikhe
-                else:
-                    st.error(f"Number nahi mila. (Suna: {text})")
-        except Exception as e:
-            st.error("Awaaz saaf nahi thi. Dobara koshish karein.")
+                    st.rerun()
+        except:
+            st.error("Samajh nahi aaya.")
 
-# --- STEP 2: CONFIRMATION (Puchne ka kaam) ---
+# --- STEP 2: PUCHO ---
 elif st.session_state.step == 2:
-    wazan = st.session_state.pending_weight
-    
-    # App Bolegi
-    msg = f"Kya main {wazan} kilo save kar doon?"
-    st.success(f"🗣️ AI Puch raha hai: **'{msg}'**")
+    w = st.session_state.pending_weight
+    msg = f"Kya main {w} kilo save kar doon?"
+    st.success(f"🗣️ AI: {msg}")
     speak(msg)
     
-    st.markdown("---")
     c1, c2 = st.columns(2)
-    
-    # HAAN Button
     if c1.button("✅ HAAN (Save)", type="primary", use_container_width=True):
-        conn = get_connection()
-        rate = 25 # Rate fix kar sakte hain ya DB se le sakte hain
-        total_price = wazan * rate
-        now = datetime.datetime.now()
-        conn.execute('INSERT INTO records (date, time, weight, price) VALUES (?, ?, ?, ?)', 
-                  (now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), wazan, total_price))
-        conn.commit()
-        conn.close()
+        # Yahan humne naya function lagaya hai
+        save_data_everywhere(w, w * 25.0) 
         
-        st.toast(f"Saved: {wazan} kg")
-        speak(f"Theek hai, {wazan} kilo save ho gaya.")
-        
-        # Reset to Step 1
+        speak("Save ho gaya.")
         st.session_state.step = 1
-        st.session_state.pending_weight = None
-        import time
-        time.sleep(2) # Thoda ruko taaki audio sunayi de
+        st.rerun()
+        
+    if c2.button("❌ NAHI", use_container_width=True):
+        st.session_state.step = 1
         st.rerun()
 
-    # NAHI Button
-    if c2.button("❌ NAHI (Cancel)", use_container_width=True):
-        speak("Cancel kar diya.")
-        st.session_state.step = 1
-        st.session_state.pending_weight = None
-        st.rerun()
-
-# --- DATA TABLE ---
+# --- TABLE ---
 st.markdown("---")
-conn = get_connection()
-df = pd.read_sql_query("SELECT * FROM records ORDER BY id DESC LIMIT 5", conn)
+conn = sqlite3.connect('rice_mill.db')
+st.table(pd.read_sql("SELECT * FROM records DESC LIMIT 5", conn))
 conn.close()
-st.table(df)
