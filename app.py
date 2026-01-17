@@ -4,10 +4,18 @@ import datetime
 import pandas as pd
 import speech_recognition as sr
 import io
+import os
 from streamlit_mic_recorder import mic_recorder
 from pydub import AudioSegment
+from gtts import gTTS # App ki Awaaz
 
-st.set_page_config(page_title="Nia Rice Mill Pro", page_icon="🌾", layout="wide")
+st.set_page_config(page_title="Nia Rice Mill AI", page_icon="🌾", layout="wide")
+
+# --- SESSION STATE (App ki Yaadasht) ---
+if 'step' not in st.session_state:
+    st.session_state.step = 1  # 1 = Sunna, 2 = Confirm karna
+if 'pending_weight' not in st.session_state:
+    st.session_state.pending_weight = None
 
 # --- DATABASE CONNECTION ---
 def get_connection():
@@ -24,122 +32,108 @@ def init_db():
 
 init_db()
 
-# --- SIDEBAR (SETTINGS) ---
+# --- HELPER: App Bolegi ---
+def speak(text):
+    try:
+        tts = gTTS(text=text, lang='hi')
+        filename = "temp_audio.mp3"
+        tts.save(filename)
+        # Hidden audio player jo khud bajega
+        st.audio(filename, format="audio/mp3", autoplay=True)
+    except:
+        pass # Agar audio fail ho jaye toh error mat dikhao
+
+# --- SIDEBAR (Admin) ---
 with st.sidebar:
-    st.header("⚙️ Settings")
-    rate = st.number_input("Aaj ka Rate (₹/kg)", value=25.0, step=0.5)
-    st.info(f"Current Rate: ₹{rate}/kg")
-    if st.button("🗑️ Reset Database (DANGER)"):
-        conn = get_connection()
-        conn.execute("DELETE FROM records")
-        conn.commit()
-        conn.close()
-        st.warning("Sab kuch delete ho gaya!")
+    if st.button("🔄 Refresh / Reset App"):
+        st.session_state.step = 1
+        st.session_state.pending_weight = None
+        st.rerun()
 
 # --- MAIN APP ---
-st.title("🌾 Nia Rice Mill Manager")
-st.markdown(f"**Date:** {datetime.date.today().strftime('%d-%m-%Y')}")
+st.title("🌾 Nia Rice Mill AI")
 
-# --- 1. DASHBOARD (AAJ KA HISAAB) ---
-conn = get_connection()
-df = pd.read_sql_query("SELECT * FROM records", conn)
-conn.close()
+# --- STEP 1: VOICE INPUT (Sunne ka kaam) ---
+if st.session_state.step == 1:
+    st.info("🎙️ Niche Mic dabayein aur Wazan bolein...")
+    
+    # Mic Button
+    c1, c2 = st.columns([1, 4])
+    with c1:
+        audio = mic_recorder(start_prompt="🔴 Start", stop_prompt="⏹️ Stop", key='recorder_step1')
+    
+    if audio:
+        try:
+            # Convert Audio
+            webm_data = audio['bytes']
+            sound = AudioSegment.from_file(io.BytesIO(webm_data))
+            wav_buffer = io.BytesIO()
+            sound.export(wav_buffer, format="wav")
+            wav_buffer.seek(0)
 
-# Sirf Aaj ka data filter karo
-today_str = datetime.date.today().strftime("%Y-%m-%d")
-df_today = df[df['date'] == today_str]
-
-# Metrics dikhao
-col1, col2, col3 = st.columns(3)
-total_weight = df_today['weight'].sum()
-total_money = df_today['price'].sum()
-trucks = len(df_today)
-
-col1.metric("📦 Aaj ka Dhaan", f"{total_weight} Kg")
-col2.metric("💰 Aaj ki Dindari", f"₹{total_money:,.0f}")
-col3.metric("🚚 Total Entries", f"{trucks}")
-
-st.markdown("---")
-
-# --- 2. VOICE ENTRY SECTION ---
-c1, c2 = st.columns([1, 2])
-
-with c1:
-    st.subheader("🎙️ Bolkar Entry")
-    audio = mic_recorder(start_prompt="🔴 Start (Mic)", stop_prompt="⏹️ Stop", key='recorder')
-
-with c2:
-    st.subheader("⌨️ Likhkar Entry")
-    manual_w = st.number_input("Wazan (Kg)", min_value=0.0, step=0.5, label_visibility="collapsed")
-    if st.button("Save Manual Entry"):
-        if manual_w > 0:
-            conn = get_connection()
-            t_price = manual_w * rate
-            now = datetime.datetime.now()
-            conn.execute('INSERT INTO records (date, time, weight, price) VALUES (?, ?, ?, ?)', 
-                      (now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), manual_w, t_price))
-            conn.commit()
-            conn.close()
-            st.success("Saved!")
-            st.rerun()
-
-# --- VOICE LOGIC ---
-if audio:
-    try:
-        # Convert WebM -> WAV
-        webm_data = audio['bytes']
-        sound = AudioSegment.from_file(io.BytesIO(webm_data))
-        wav_buffer = io.BytesIO()
-        sound.export(wav_buffer, format="wav")
-        wav_buffer.seek(0)
-
-        # Listen
-        r = sr.Recognizer()
-        with sr.AudioFile(wav_buffer) as source:
-            audio_file = r.record(source)
-            text = r.recognize_google(audio_file, language="hi-IN")
-            
-            # Number Logic
-            numbers = [float(s) for s in text.split() if s.replace('.', '', 1).isdigit()]
-            
-            if numbers:
-                wazan = numbers[0]
-                total_price = wazan * rate
+            # Recognize
+            r = sr.Recognizer()
+            with sr.AudioFile(wav_buffer) as source:
+                audio_file = r.record(source)
+                text = r.recognize_google(audio_file, language="hi-IN")
                 
-                # Save to DB
-                conn = get_connection()
-                now = datetime.datetime.now()
-                conn.execute('INSERT INTO records (date, time, weight, price) VALUES (?, ?, ?, ?)', 
-                          (now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), wazan, total_price))
-                conn.commit()
-                conn.close()
+                # Number Logic
+                numbers = [float(s) for s in text.split() if s.replace('.', '', 1).isdigit()]
                 
-                st.toast(f"✅ Saved: {wazan} kg", icon="🎉")
-                st.rerun() # Page refresh karo taaki table update ho jaye
-            else:
-                st.error(f"❌ Number nahi mila. Suna: '{text}'")
-    except Exception as e:
-        st.error(f"Error: {e}")
+                if numbers:
+                    wazan = numbers[0]
+                    # STATE CHANGE: Ab Step 2 par jao
+                    st.session_state.pending_weight = wazan
+                    st.session_state.step = 2
+                    st.rerun() # Page reload karo taaki Step 2 dikhe
+                else:
+                    st.error(f"Number nahi mila. (Suna: {text})")
+        except Exception as e:
+            st.error("Awaaz saaf nahi thi. Dobara koshish karein.")
 
-# --- 3. RECENT ENTRIES & DELETE ---
-st.markdown("---")
-st.subheader("📜 Haal Hi Ki Entries (Delete karne ke liye box tick karein)")
-
-if not df.empty:
-    # Delete Logic
-    for index, row in df.sort_values(by='id', ascending=False).head(10).iterrows():
-        c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 2, 1])
-        c1.write(f"**{row['time']}**")
-        c2.write(f"{row['weight']} Kg")
-        c3.write(f"₹{row['price']}")
+# --- STEP 2: CONFIRMATION (Puchne ka kaam) ---
+elif st.session_state.step == 2:
+    wazan = st.session_state.pending_weight
+    
+    # App Bolegi
+    msg = f"Kya main {wazan} kilo save kar doon?"
+    st.success(f"🗣️ AI Puch raha hai: **'{msg}'**")
+    speak(msg)
+    
+    st.markdown("---")
+    c1, c2 = st.columns(2)
+    
+    # HAAN Button
+    if c1.button("✅ HAAN (Save)", type="primary", use_container_width=True):
+        conn = get_connection()
+        rate = 25 # Rate fix kar sakte hain ya DB se le sakte hain
+        total_price = wazan * rate
+        now = datetime.datetime.now()
+        conn.execute('INSERT INTO records (date, time, weight, price) VALUES (?, ?, ?, ?)', 
+                  (now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), wazan, total_price))
+        conn.commit()
+        conn.close()
         
-        # Har row ke aage delete button
-        if c5.button("❌", key=row['id']):
-            conn = get_connection()
-            conn.execute("DELETE FROM records WHERE id=?", (row['id'],))
-            conn.commit()
-            conn.close()
-            st.warning("Entry Delete Ho Gayi!")
-            st.rerun()
-else:
-    st.info("Abhi koi data nahi hai.")
+        st.toast(f"Saved: {wazan} kg")
+        speak(f"Theek hai, {wazan} kilo save ho gaya.")
+        
+        # Reset to Step 1
+        st.session_state.step = 1
+        st.session_state.pending_weight = None
+        import time
+        time.sleep(2) # Thoda ruko taaki audio sunayi de
+        st.rerun()
+
+    # NAHI Button
+    if c2.button("❌ NAHI (Cancel)", use_container_width=True):
+        speak("Cancel kar diya.")
+        st.session_state.step = 1
+        st.session_state.pending_weight = None
+        st.rerun()
+
+# --- DATA TABLE ---
+st.markdown("---")
+conn = get_connection()
+df = pd.read_sql_query("SELECT * FROM records ORDER BY id DESC LIMIT 5", conn)
+conn.close()
+st.table(df)
