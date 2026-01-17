@@ -5,15 +5,19 @@ import pandas as pd
 import speech_recognition as sr
 import io
 import os
+import time  # Time library jodi hai rukne ke liye
 from streamlit_mic_recorder import mic_recorder
 from pydub import AudioSegment
 from gtts import gTTS
 from streamlit_gsheets import GSheetsConnection
 
-st.set_page_config(page_title="Nia Rice Mill AI", page_icon="🌾", layout="wide")
+st.set_page_config(page_title="Nia Rice Mill AI Debug", page_icon="🐞", layout="wide")
 
-# --- CONNECT TO GOOGLE SHEET ---
-conn_gsheets = st.connection("gsheets", type=GSheetsConnection)
+# --- GOOGLE SHEETS CONNECTION ---
+try:
+    conn_gsheets = st.connection("gsheets", type=GSheetsConnection)
+except Exception as e:
+    st.error(f"Connection Error: {e}")
 
 # --- SESSION STATE ---
 if 'step' not in st.session_state:
@@ -21,41 +25,50 @@ if 'step' not in st.session_state:
 if 'pending_weight' not in st.session_state:
     st.session_state.pending_weight = None
 
-# --- FUNCTION: SAVE DATA (Local + Google Sheet) ---
+# --- SAVE DATA FUNCTION (With Error Reporting) ---
 def save_data_everywhere(wazan, price):
+    status_box = st.empty() # Khali dabba status ke liye
+    status_box.info("⏳ Saving data... Please wait.")
+    
     now = datetime.datetime.now()
     d_date = now.strftime("%Y-%m-%d")
     d_time = now.strftime("%H:%M:%S")
 
-    # 1. Local Database (App ke liye)
-    conn = sqlite3.connect('rice_mill.db')
-    conn.execute('INSERT INTO records (date, time, weight, price) VALUES (?, ?, ?, ?)', 
-              (d_date, d_time, wazan, price))
-    conn.commit()
-    conn.close()
-
-    # 2. Google Sheet (Permanent Backup)
+    # 1. Local Database
     try:
-        # Naya data create karo
+        conn = sqlite3.connect('rice_mill.db')
+        conn.execute('INSERT INTO records (date, time, weight, price) VALUES (?, ?, ?, ?)', 
+                  (d_date, d_time, wazan, price))
+        conn.commit()
+        conn.close()
+        st.write("✅ Local Database: OK")
+    except Exception as e:
+        st.error(f"❌ Local DB Error: {e}")
+
+    # 2. Google Sheets (Most likely issue here)
+    try:
         new_data = pd.DataFrame(
             [[d_date, d_time, wazan, price]], 
             columns=['Date', 'Time', 'Weight', 'Price']
         )
-        
-        # Purana data padho
+        # Read Data
+        status_box.info("⏳ Reading Google Sheet...")
         existing_data = conn_gsheets.read()
         
-        # Dono ko jodo
+        # Update Data
+        status_box.info("⏳ Updating Google Sheet...")
         updated_df = pd.concat([existing_data, new_data], ignore_index=True)
-        
-        # Wapas Sheet par update kar do
         conn_gsheets.update(data=updated_df)
-        st.toast("✅ Google Sheet Updated!", icon="☁️")
         
+        st.success("✅ Google Sheet: OK! (Saved Successfully)")
+        return True # Sab sahi hai
     except Exception as e:
-        st.error(f"⚠️ Sheet Error: {e}")
+        status_box.empty()
+        st.error(f"❌ Google Sheet Error: {e}")
+        st.warning("Note: Agar '403' ya 'Permission' error hai, toh Sheet Public Editor honi chahiye.")
+        return False # Gadbad hai
 
-# --- HELPER: AI SPEAK ---
+# --- HELPER: SPEAK ---
 def speak(text):
     try:
         tts = gTTS(text=text, lang='hi')
@@ -64,10 +77,9 @@ def speak(text):
     except:
         pass
 
-# --- MAIN APP UI ---
-st.title("🌾 Nia Rice Mill AI")
+# --- MAIN APP ---
+st.title("🐞 Debug Mode: Nia Rice Mill")
 
-# --- STEP 1: SUNO ---
 if st.session_state.step == 1:
     st.info("🎙️ Mic dabayein aur bolein...")
     audio = mic_recorder(start_prompt="🔴 Start", stop_prompt="⏹️ Stop", key='rec1')
@@ -90,30 +102,30 @@ if st.session_state.step == 1:
                     st.session_state.step = 2
                     st.rerun()
         except:
-            st.error("Samajh nahi aaya.")
+            st.error("Awaaz samajh nahi aayi.")
 
-# --- STEP 2: PUCHO ---
 elif st.session_state.step == 2:
     w = st.session_state.pending_weight
     msg = f"Kya main {w} kilo save kar doon?"
-    st.success(f"🗣️ AI: {msg}")
-    speak(msg)
+    st.info(f"🗣️ AI: {msg}")
     
     c1, c2 = st.columns(2)
+    
+    # HAAN BUTTON
     if c1.button("✅ HAAN (Save)", type="primary", use_container_width=True):
-        # Yahan humne naya function lagaya hai
-        save_data_everywhere(w, w * 25.0) 
+        # Result ka wait karenge
+        is_success = save_data_everywhere(w, w * 25.0)
         
-        speak("Save ho gaya.")
-        st.session_state.step = 1
-        st.rerun()
-        
+        if is_success:
+            speak("Save ho gaya.")
+            time.sleep(3) # 3 second ruko taaki user "Success" dekh sake
+            st.session_state.step = 1
+            st.rerun()
+        else:
+            speak("Error aaya hai. Screen dekhein.")
+            # Hum rerun NAHI karenge taaki aap error padh sakein
+
+    # NAHI BUTTON
     if c2.button("❌ NAHI", use_container_width=True):
         st.session_state.step = 1
         st.rerun()
-
-# --- TABLE ---
-st.markdown("---")
-conn = sqlite3.connect('rice_mill.db')
-st.table(pd.read_sql("SELECT * FROM records DESC LIMIT 5", conn))
-conn.close()
