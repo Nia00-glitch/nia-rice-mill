@@ -1,0 +1,3 @@
+Weight: 50.0 kg | Price: 1250.0 Rs
+Weight: 50.0 kg | Price: 1250.0 Rs
+2026-01-15 | 16:19:58 | Weight: 50.0 kg | Price: 1250.0 Rs
