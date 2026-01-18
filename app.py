@@ -11,17 +11,17 @@ from pydub import AudioSegment
 from gtts import gTTS
 from streamlit_gsheets import GSheetsConnection
 
-# --- PAGE SETUP (International Look) ---
-st.set_page_config(page_title="Nia Rice Mill SaaS", page_icon="🌾", layout="wide")
+# Page Config
+st.set_page_config(page_title="Nia Rice Mill AI", page_icon="🌾", layout="wide")
 
-# --- CONNECT TO GOOGLE SHEET ---
+# --- CONNECT ---
 try:
     conn_gsheets = st.connection("gsheets", type=GSheetsConnection)
 except:
-    st.error("⚠️ Internet Error: Google Sheet connect nahi hui.")
+    st.error("⚠️ Internet Error.")
     st.stop()
 
-# --- SESSION STATE ---
+# --- SESSION ---
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
 if 'user_info' not in st.session_state:
@@ -31,7 +31,7 @@ if 'step' not in st.session_state:
 if 'pending_weight' not in st.session_state:
     st.session_state.pending_weight = None
 
-# --- HELPER: SPEAK ---
+# --- SPEAK ---
 def speak(text):
     try:
         tts = gTTS(text=text, lang='hi')
@@ -40,7 +40,42 @@ def speak(text):
     except:
         pass
 
-# --- LOGIN LOGIC ---
+# --- FUNCTION: ACTIVATE ACCOUNT (New) ---
+def activate_account(mill_id, secret_code, new_user, new_pass, name):
+    try:
+        df = conn_gsheets.read(worksheet="Users")
+        
+        # Data Cleaning for matching
+        df['Mill_ID'] = df['Mill_ID'].astype(str).str.strip()
+        df['Secret_Code'] = df['Secret_Code'].astype(str).str.strip()
+        
+        # Check agar ye Mill ID aur Secret Code match karta hai
+        mask = (df['Mill_ID'] == str(mill_id)) & (df['Secret_Code'] == str(secret_code))
+        
+        if df[mask].empty:
+            return "INVALID_CODE"
+        
+        # Check agar pehle se Registered hai (Username bhara hua hai)
+        current_user = df.loc[mask, 'Username'].values[0]
+        if pd.notna(current_user) and str(current_user).strip() != "":
+            return "ALREADY_REGISTERED"
+            
+        # UPDATE THE ROW
+        # Hum puri row update karenge
+        row_index = df[mask].index[0]
+        df.at[row_index, 'Username'] = new_user
+        df.at[row_index, 'Password'] = new_pass
+        df.at[row_index, 'Name'] = name
+        df.at[row_index, 'Is_Active'] = "TRUE" # Activate kar do
+        
+        # Wapas Sheet mein likho
+        conn_gsheets.update(worksheet="Users", data=df)
+        return "SUCCESS"
+        
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+# --- FUNCTION: LOGIN ---
 def check_login(username, password):
     try:
         users_df = conn_gsheets.read(worksheet="Users")
@@ -53,24 +88,23 @@ def check_login(username, password):
             status_str = str(raw_active).strip().upper()
             
             if str(password) == stored_password:
-                if status_str in ['TRUE', '1', '1.0', 'YES', 'ON']:
+                if status_str in ['TRUE', '1', 'YES']:
                     return user.iloc[0].to_dict()
                 else:
                     return "BLOCKED"
         return None
-    except Exception as e:
-        st.error(f"Login Error: {e}")
+    except:
         return None
 
-# --- SAVE DATA ---
-def save_data_secure(wazan, price):
+# --- FUNCTION: SAVE DATA ---
+def save_data_secure(wazan, rate):
     now = datetime.datetime.now()
     d_date = now.strftime("%Y-%m-%d")
     d_time = now.strftime("%H:%M:%S")
     my_mill_id = st.session_state.user_info['Mill_ID']
-    munim_name = st.session_state.user_info['Name']
+    munim = st.session_state.user_info['Name']
+    price = (wazan / 100.0) * rate
 
-    # Local Backup
     try:
         conn = sqlite3.connect('rice_mill.db')
         conn.execute('INSERT INTO records (date, time, weight, price, mill_id) VALUES (?, ?, ?, ?, ?)', 
@@ -80,113 +114,91 @@ def save_data_secure(wazan, price):
     except:
         pass
 
-    # Cloud Save
     try:
-        new_data = pd.DataFrame(
-            [[my_mill_id, d_date, d_time, wazan, price, munim_name]], 
-            columns=['Mill_ID', 'Date', 'Time', 'Weight', 'Price', 'EntryBy']
-        )
-        existing_data = conn_gsheets.read() 
-        updated_df = pd.concat([existing_data, new_data], ignore_index=True)
-        conn_gsheets.update(data=updated_df)
-        st.toast(f"✅ Saved: {wazan}kg", icon="💾")
+        new_data = pd.DataFrame([[my_mill_id, d_date, d_time, wazan, price, munim]], 
+            columns=['Mill_ID', 'Date', 'Time', 'Weight', 'Price', 'EntryBy'])
+        existing = conn_gsheets.read() 
+        updated = pd.concat([existing, new_data], ignore_index=True)
+        conn_gsheets.update(data=updated)
+        st.toast("✅ Saved!", icon="💾")
         return True
-    except Exception as e:
-        st.error(f"Cloud Save Error: {e}")
+    except:
         return False
 
 # ==========================================
-# 🔐 LOGIN SCREEN (Simple & Clean)
+# 🔐 AUTHENTICATION SCREEN
 # ==========================================
 if not st.session_state.logged_in:
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col2:
-        st.markdown("<br><br><h1 style='text-align: center;'>🌾 Nia Rice Mill</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center; color: grey;'>Secure Login System</p>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center;'>🌾 Nia Rice Mill SaaS</h1>", unsafe_allow_html=True)
+    
+    # TABS: Login vs Activation
+    tab1, tab2 = st.tabs(["🔑 Login (Purane User)", "✨ Account Activate (Naye User)"])
+    
+    # --- TAB 1: LOGIN ---
+    with tab1:
+        c1, c2, c3 = st.columns([1,2,1])
+        with c2:
+            with st.form("login_form"):
+                u = st.text_input("Username")
+                p = st.text_input("Password", type="password")
+                if st.form_submit_button("Login", type="primary", use_container_width=True):
+                    res = check_login(u, p)
+                    if res == "BLOCKED": st.error("Account Locked.")
+                    elif res:
+                        st.session_state.logged_in = True
+                        st.session_state.user_info = res
+                        st.session_state.current_rate = 2500.0
+                        st.rerun()
+                    else: st.error("Galat Username/Password")
+
+    # --- TAB 2: ACTIVATION (Privacy Solution) ---
+    with tab2:
+        st.info("ℹ️ Agar aap pehli baar aaye hain, toh yahan apna account banayein.")
+        ac1, ac2 = st.columns(2)
         
-        with st.form("login_form"):
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
-            submit = st.form_submit_button("🔒 Secure Login", type="primary", use_container_width=True)
+        with ac1:
+            # Ye info hum denge (Onboarding Kit)
+            act_mill_id = st.text_input("Mill ID (Provided by Admin)")
+            act_code = st.text_input("Secret Code (Provided by Admin)", type="password")
+        
+        with ac2:
+            # Ye user khud set karega (Privacy)
+            new_user = st.text_input("Apna Naya Username Set Karein")
+            new_pass = st.text_input("Apna Naya Password Set Karein", type="password")
+            new_name = st.text_input("Aapka Naam (Display Name)")
             
-            if submit:
-                user_data = check_login(username, password)
-                if user_data == "BLOCKED":
-                    st.error("🚫 Account Deactivated.")
-                elif user_data:
-                    st.session_state.logged_in = True
-                    st.session_state.user_info = user_data
-                    st.rerun()
-                else:
-                    st.error("❌ Invalid Credentials")
+        if st.button("🚀 Account Activate Karein", use_container_width=True):
+            if act_mill_id and act_code and new_user and new_pass:
+                status = activate_account(act_mill_id, act_code, new_user, new_pass, new_name)
+                
+                if status == "SUCCESS":
+                    st.success("🎉 Account Ban Gaya! Ab 'Login' tab mein jakar login karein.")
+                    st.balloons()
+                elif status == "ALREADY_REGISTERED":
+                    st.warning("Ye Account pehle se bana hua hai. Login karein.")
+                elif status == "INVALID_CODE":
+                    st.error("❌ Galat Mill ID ya Secret Code.")
+            else:
+                st.warning("Sabhi fields bharein.")
+    
     st.stop()
 
 # ==========================================
-# 🏭 MAIN DASHBOARD (The International Look)
+# 🏭 MAIN APP (Dashboard)
 # ==========================================
-
-# 1. HEADER SECTION
-st.markdown(f"### 🌾 {st.session_state.user_info['Mill_ID']}")
-st.markdown(f"**Welcome, {st.session_state.user_info['Name']}** | Role: {st.session_state.user_info['Role']}")
-
-# Logout Button (Top Right)
+st.markdown(f"### 🏭 {st.session_state.user_info['Mill_ID']} | 👤 {st.session_state.user_info['Name']}")
 if st.sidebar.button("🚪 Logout"):
     st.session_state.logged_in = False
     st.rerun()
-
 st.divider()
 
-# 2. DATA LOADING & PROCESSING
-all_data = conn_gsheets.read()
-# Filter only My Mill Data
-my_data = all_data[all_data['Mill_ID'] == st.session_state.user_info['Mill_ID']].copy()
+# --- ENTRY & DASHBOARD ---
+c1, c2 = st.columns([1, 2])
 
-# Ensure Numbers are Numbers (Data Cleaning)
-my_data['Weight'] = pd.to_numeric(my_data['Weight'], errors='coerce').fillna(0)
-my_data['Price'] = pd.to_numeric(my_data['Price'], errors='coerce').fillna(0)
-
-# Calculate "Today's" Stats
-today_date = datetime.datetime.now().strftime("%Y-%m-%d")
-todays_data = my_data[my_data['Date'] == today_date]
-
-total_weight_today = todays_data['Weight'].sum()
-total_price_today = todays_data['Price'].sum()
-total_trucks_today = len(todays_data)
-
-# 3. KPI CARDS (Bade Numbers)
-st.markdown("### 📊 Aaj ka Hisab (Today's Overview)")
-kpi1, kpi2, kpi3 = st.columns(3)
-
-kpi1.metric(
-    label="📦 Aaj Ki Aavak (Weight)",
-    value=f"{total_weight_today:,.1f} kg",
-    delta=f"{total_trucks_today} Entries"
-)
-
-kpi2.metric(
-    label="💰 Aaj Ki Value",
-    value=f"₹ {total_price_today:,.0f}",
-    delta="Estimated"
-)
-
-kpi3.metric(
-    label="🚛 Total Entries (All Time)",
-    value=len(my_data),
-    delta_color="off"
-)
-
-st.divider()
-
-# 4. ENTRY SECTION (Left) & CHART (Right)
-col_entry, col_chart = st.columns([1, 2])
-
-with col_entry:
-    st.subheader("🎙️ Nayi Entry")
-    st.info("Mic dabayein aur wazan bolein...")
-    
-    # Audio Input
+with c1:
+    st.subheader("🎙️ Voice Entry")
     if st.session_state.step == 1:
-        audio = mic_recorder(start_prompt="🔴 Record", stop_prompt="⏹️ Stop", key='rec1')
+        audio = mic_recorder(start_prompt="🔴 Start", stop_prompt="⏹️ Stop", key='rec1')
         if audio:
             try:
                 webm = audio['bytes']
@@ -202,38 +214,25 @@ with col_entry:
                         st.session_state.pending_weight = nums[0]
                         st.session_state.step = 2
                         st.rerun()
-            except:
-                st.warning("Retry...")
-
-    # Confirmation
+            except: st.warning("Retry")
+            
     elif st.session_state.step == 2:
         w = st.session_state.pending_weight
-        st.success(f"⚖️ Weight: **{w} kg**")
-        speak(f"{w} kilo")
-        
-        c1, c2 = st.columns(2)
-        if c1.button("✅ SAVE", type="primary", use_container_width=True):
-            save_data_secure(w, w * 25.0)
+        st.success(f"⚖️ {w} kg")
+        btn1, btn2 = st.columns(2)
+        if btn1.button("✅ Save"):
+            save_data_secure(w, st.session_state.current_rate)
             time.sleep(1)
             st.session_state.step = 1
             st.rerun()
-        if c2.button("❌ CANCEL", use_container_width=True):
+        if btn2.button("❌ Cancel"):
             st.session_state.step = 1
             st.rerun()
 
-with col_chart:
-    st.subheader("📈 Aavak Trend (Last 7 Days)")
-    if not my_data.empty:
-        # Group by Date to show daily totals
-        daily_data = my_data.groupby('Date')['Weight'].sum().reset_index()
-        st.bar_chart(daily_data.set_index('Date'), color="#FF4B4B")
-    else:
-        st.write("Abhi graph ke liye data kam hai.")
-
-# 5. RECENT TABLE (Bottom)
-st.markdown("### 📋 Recent Logs")
-st.dataframe(
-    my_data.sort_values(by="Date", ascending=False).head(5),
-    use_container_width=True,
-    hide_index=True
-)
+with c2:
+    st.subheader("📊 Live Data")
+    try:
+        df = conn_gsheets.read()
+        my_df = df[df['Mill_ID'] == st.session_state.user_info['Mill_ID']]
+        st.dataframe(my_df.tail(5), hide_index=True, use_container_width=True)
+    except: pass
