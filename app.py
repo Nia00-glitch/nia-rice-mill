@@ -11,17 +11,14 @@ from pydub import AudioSegment
 from gtts import gTTS
 from streamlit_gsheets import GSheetsConnection
 
-# Page Config
 st.set_page_config(page_title="Nia Rice Mill AI", page_icon="🌾", layout="wide")
 
-# --- CONNECT ---
 try:
     conn_gsheets = st.connection("gsheets", type=GSheetsConnection)
 except:
     st.error("⚠️ Internet Error.")
     st.stop()
 
-# --- SESSION ---
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
 if 'user_info' not in st.session_state:
@@ -31,7 +28,6 @@ if 'step' not in st.session_state:
 if 'pending_weight' not in st.session_state:
     st.session_state.pending_weight = None
 
-# --- SPEAK ---
 def speak(text):
     try:
         tts = gTTS(text=text, lang='hi')
@@ -40,55 +36,76 @@ def speak(text):
     except:
         pass
 
-# --- FUNCTION: ACTIVATE ACCOUNT (New) ---
+# --- ROBUST ACTIVATION FUNCTION ---
 def activate_account(mill_id, secret_code, new_user, new_pass, name):
     try:
         df = conn_gsheets.read(worksheet="Users")
         
-        # Data Cleaning for matching
-        df['Mill_ID'] = df['Mill_ID'].astype(str).str.strip()
-        df['Secret_Code'] = df['Secret_Code'].astype(str).str.strip()
+        # 1. Header Cleaning (Space hatana)
+        df.columns = df.columns.str.strip()
         
-        # Check agar ye Mill ID aur Secret Code match karta hai
-        mask = (df['Mill_ID'] == str(mill_id)) & (df['Secret_Code'] == str(secret_code))
+        # 2. Handle Spelling Mistake (Secret_Cod vs Secret_Code)
+        if 'Secret_Code' not in df.columns and 'Secret_Cod' in df.columns:
+            df.rename(columns={'Secret_Cod': 'Secret_Code'}, inplace=True)
+            
+        # 3. Data Cleaning (1234.0 -> 1234 fix)
+        df['Mill_ID'] = df['Mill_ID'].astype(str).str.strip()
+        
+        # Convert Secret Code to string, remove .0, and strip spaces
+        df['Secret_Code'] = df['Secret_Code'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        
+        # Input Cleaning
+        input_mill = str(mill_id).strip()
+        input_code = str(secret_code).strip()
+        
+        # Debugging Info (Screen par dikhega agar error aaye)
+        # st.write("Searching for:", input_mill, input_code)
+        # st.write("Data in Sheet:", df[['Mill_ID', 'Secret_Code']].head())
+        
+        # Matching
+        mask = (df['Mill_ID'] == input_mill) & (df['Secret_Code'] == input_code)
         
         if df[mask].empty:
             return "INVALID_CODE"
         
-        # Check agar pehle se Registered hai (Username bhara hua hai)
-        current_user = df.loc[mask, 'Username'].values[0]
-        if pd.notna(current_user) and str(current_user).strip() != "":
+        row_index = df[mask].index[0]
+        
+        # Check if already registered
+        current_user = str(df.at[row_index, 'Username'])
+        if current_user != "nan" and current_user.strip() != "":
             return "ALREADY_REGISTERED"
             
-        # UPDATE THE ROW
-        # Hum puri row update karenge
-        row_index = df[mask].index[0]
+        # Update Data
         df.at[row_index, 'Username'] = new_user
         df.at[row_index, 'Password'] = new_pass
         df.at[row_index, 'Name'] = name
-        df.at[row_index, 'Is_Active'] = "TRUE" # Activate kar do
+        df.at[row_index, 'Is_Active'] = "TRUE"
         
-        # Wapas Sheet mein likho
         conn_gsheets.update(worksheet="Users", data=df)
         return "SUCCESS"
         
     except Exception as e:
         return f"Error: {str(e)}"
 
-# --- FUNCTION: LOGIN ---
+# --- LOGIN ---
 def check_login(username, password):
     try:
         users_df = conn_gsheets.read(worksheet="Users")
-        users_df['Username'] = users_df['Username'].astype(str)
-        user = users_df[users_df['Username'] == str(username)]
+        users_df.columns = users_df.columns.str.strip() # Header fix
+        
+        users_df['Username'] = users_df['Username'].astype(str).str.strip()
+        user = users_df[users_df['Username'] == str(username).strip()]
         
         if not user.empty:
-            stored_password = str(user.iloc[0]['Password'])
+            stored_password = str(user.iloc[0]['Password']).strip()
             raw_active = user.iloc[0]['Is_Active']
             status_str = str(raw_active).strip().upper()
             
-            if str(password) == stored_password:
-                if status_str in ['TRUE', '1', 'YES']:
+            # Smart Active Check (TRUE/Tick/1)
+            is_active_bool = status_str in ['TRUE', '1', '1.0', 'YES', 'ON']
+            
+            if str(password).strip() == stored_password:
+                if is_active_bool:
                     return user.iloc[0].to_dict()
                 else:
                     return "BLOCKED"
@@ -96,7 +113,7 @@ def check_login(username, password):
     except:
         return None
 
-# --- FUNCTION: SAVE DATA ---
+# --- SAVE DATA ---
 def save_data_secure(wazan, rate):
     now = datetime.datetime.now()
     d_date = now.strftime("%Y-%m-%d")
@@ -111,8 +128,7 @@ def save_data_secure(wazan, rate):
                   (d_date, d_time, wazan, price, my_mill_id))
         conn.commit()
         conn.close()
-    except:
-        pass
+    except: pass
 
     try:
         new_data = pd.DataFrame([[my_mill_id, d_date, d_time, wazan, price, munim]], 
@@ -122,19 +138,15 @@ def save_data_secure(wazan, rate):
         conn_gsheets.update(data=updated)
         st.toast("✅ Saved!", icon="💾")
         return True
-    except:
-        return False
+    except: return False
 
 # ==========================================
-# 🔐 AUTHENTICATION SCREEN
+# AUTH SCREEN
 # ==========================================
 if not st.session_state.logged_in:
     st.markdown("<h1 style='text-align: center;'>🌾 Nia Rice Mill SaaS</h1>", unsafe_allow_html=True)
+    tab1, tab2 = st.tabs(["🔑 Login", "✨ Activate Account"])
     
-    # TABS: Login vs Activation
-    tab1, tab2 = st.tabs(["🔑 Login (Purane User)", "✨ Account Activate (Naye User)"])
-    
-    # --- TAB 1: LOGIN ---
     with tab1:
         c1, c2, c3 = st.columns([1,2,1])
         with c2:
@@ -151,40 +163,36 @@ if not st.session_state.logged_in:
                         st.rerun()
                     else: st.error("Galat Username/Password")
 
-    # --- TAB 2: ACTIVATION (Privacy Solution) ---
     with tab2:
-        st.info("ℹ️ Agar aap pehli baar aaye hain, toh yahan apna account banayein.")
+        st.info("ℹ️ Naye user yahan setup karein.")
         ac1, ac2 = st.columns(2)
-        
         with ac1:
-            # Ye info hum denge (Onboarding Kit)
-            act_mill_id = st.text_input("Mill ID (Provided by Admin)")
-            act_code = st.text_input("Secret Code (Provided by Admin)", type="password")
-        
+            act_mill_id = st.text_input("Mill ID")
+            act_code = st.text_input("Secret Code", type="password")
         with ac2:
-            # Ye user khud set karega (Privacy)
-            new_user = st.text_input("Apna Naya Username Set Karein")
-            new_pass = st.text_input("Apna Naya Password Set Karein", type="password")
-            new_name = st.text_input("Aapka Naam (Display Name)")
+            new_user = st.text_input("New Username")
+            new_pass = st.text_input("New Password", type="password")
+            new_name = st.text_input("Your Name")
             
-        if st.button("🚀 Account Activate Karein", use_container_width=True):
+        if st.button("🚀 Activate"):
             if act_mill_id and act_code and new_user and new_pass:
-                status = activate_account(act_mill_id, act_code, new_user, new_pass, new_name)
-                
-                if status == "SUCCESS":
-                    st.success("🎉 Account Ban Gaya! Ab 'Login' tab mein jakar login karein.")
-                    st.balloons()
-                elif status == "ALREADY_REGISTERED":
-                    st.warning("Ye Account pehle se bana hua hai. Login karein.")
-                elif status == "INVALID_CODE":
-                    st.error("❌ Galat Mill ID ya Secret Code.")
+                with st.spinner("Checking..."):
+                    status = activate_account(act_mill_id, act_code, new_user, new_pass, new_name)
+                    if status == "SUCCESS":
+                        st.balloons()
+                        st.success("✅ Account Activated! Ab Login karein.")
+                    elif status == "ALREADY_REGISTERED":
+                        st.warning("Ye account pehle se bana hua hai.")
+                    elif status == "INVALID_CODE":
+                        st.error("❌ Invalid ID or Code. Check Sheet spelling.")
+                    else:
+                        st.error(status)
             else:
                 st.warning("Sabhi fields bharein.")
-    
     st.stop()
 
 # ==========================================
-# 🏭 MAIN APP (Dashboard)
+# MAIN DASHBOARD
 # ==========================================
 st.markdown(f"### 🏭 {st.session_state.user_info['Mill_ID']} | 👤 {st.session_state.user_info['Name']}")
 if st.sidebar.button("🚪 Logout"):
@@ -192,13 +200,11 @@ if st.sidebar.button("🚪 Logout"):
     st.rerun()
 st.divider()
 
-# --- ENTRY & DASHBOARD ---
 c1, c2 = st.columns([1, 2])
-
 with c1:
-    st.subheader("🎙️ Voice Entry")
+    st.subheader("🎙️ Entry")
     if st.session_state.step == 1:
-        audio = mic_recorder(start_prompt="🔴 Start", stop_prompt="⏹️ Stop", key='rec1')
+        audio = mic_recorder(start_prompt="🔴 Rec", stop_prompt="⏹️ Stop", key='rec1')
         if audio:
             try:
                 webm = audio['bytes']
@@ -214,25 +220,23 @@ with c1:
                         st.session_state.pending_weight = nums[0]
                         st.session_state.step = 2
                         st.rerun()
-            except: st.warning("Retry")
+            except: pass
             
     elif st.session_state.step == 2:
         w = st.session_state.pending_weight
         st.success(f"⚖️ {w} kg")
-        btn1, btn2 = st.columns(2)
-        if btn1.button("✅ Save"):
+        if st.button("✅ SAVE"):
             save_data_secure(w, st.session_state.current_rate)
             time.sleep(1)
             st.session_state.step = 1
             st.rerun()
-        if btn2.button("❌ Cancel"):
+        if st.button("❌ CANCEL"):
             st.session_state.step = 1
             st.rerun()
 
 with c2:
-    st.subheader("📊 Live Data")
     try:
         df = conn_gsheets.read()
         my_df = df[df['Mill_ID'] == st.session_state.user_info['Mill_ID']]
-        st.dataframe(my_df.tail(5), hide_index=True, use_container_width=True)
+        st.dataframe(my_df.tail(5), hide_index=True)
     except: pass
